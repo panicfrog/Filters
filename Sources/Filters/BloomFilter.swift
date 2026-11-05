@@ -8,11 +8,11 @@
 import Foundation
 
 public final class BloomFilter: Filter {
-    
+
     private var bitmap: Bitmap
     private let hashCount: Int
     private let hasher: any Hasher
-    
+
     /// create bloom filter
     /// - Parameters:
     ///   - hashCount: bits count per element
@@ -23,37 +23,37 @@ public final class BloomFilter: Filter {
         self.bitmap = bitmap
         self.hasher = hasher
     }
-    
+
     /// add element to bloom filter
+    ///
+    /// 元素字节全程作用域借用，无中间 `Data` / `[Int]` 分配。
     /// - Parameter element: element
     public func add(_ element: FilterElement) {
-        let data = element.data()
-        let locations = hashValues(data)
-        for location in locations {
-            bitmap.set(value: true, for: location)
+        element.withUnsafeBytes { buffer in
+            let bitsCount = Int64(bitmap.count)
+            for i in 0..<hashCount {
+                let hash = hasher.hashValues(buffer, seed: UInt32(i))
+                bitmap.set(value: true, for: Int(abs(Int64(hash)) % bitsCount))
+            }
         }
     }
-    
+
     /// determine whether the bloom filter contains this element
+    ///
+    /// 元素字节全程作用域借用，无中间 `Data` / `[Int]` 分配，首个未命中位即返回。
     /// - Parameter element: element
     /// - Returns: result
     public func contains(_ element: FilterElement) -> Bool {
-        let data = element.data()
-        let hashes = hashValues(data)
-        for hash in hashes where bitmap.get(for: hash) == false {
-            return false
+        element.withUnsafeBytes { buffer -> Bool in
+            let bitsCount = Int64(bitmap.count)
+            for i in 0..<hashCount {
+                let hash = hasher.hashValues(buffer, seed: UInt32(i))
+                if bitmap.get(for: Int(abs(Int64(hash)) % bitsCount)) == false {
+                    return false
+                }
+            }
+            return true
         }
-        return true
     }
-    
-    private func hashValues(_ data: Data) -> [Int] {
-        var hashValues = Array(repeating: 0, count: hashCount)
-        let bitsCount = Int64(bitmap.count)
-        for i in 0..<hashCount {
-            let hash = hasher.hashValues(data, seed: UInt32(i))
-            hashValues[i] = Int(abs(Int64(hash)) % bitsCount)
-        }
-        return hashValues
-    }
-    
+
 }
