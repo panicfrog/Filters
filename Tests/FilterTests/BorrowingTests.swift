@@ -128,4 +128,80 @@ final class BorrowingTests: XCTestCase {
     XCTAssertEqual(falsePositives, 0)
   }
 
+  // MARK: - 免派发快速路径归一化后的 .custom 兜底
+
+  /// 自定义 hasher（FNV-1a）：应走 .custom existential 路径且行为正确
+  private struct CustomFNVHasher: Hasher {
+    typealias I = UInt32
+    func hashValues(_ data: Data, seed: UInt32) -> UInt32 {
+      var hash: UInt32 = 2166136261 ^ seed
+      for byte in data {
+        hash = (hash ^ UInt32(byte)) &* 16777619
+      }
+      return hash
+    }
+  }
+
+  func testCustomHasherPath() {
+    let bloom = BloomFilter(hashCount: 6,
+                            bitmap: CompressedBitmap(100_000),
+                            hasher: CustomFNVHasher())
+    for i in 0..<500 {
+      bloom.add("custom-hasher-\(i)")
+    }
+    for i in 0..<500 {
+      XCTAssertTrue(bloom.contains("custom-hasher-\(i)"))
+    }
+    XCTAssertFalse(bloom.contains("not-present"))
+  }
+
+  /// 自定义 bitmap（[UInt8] 存储）：应走 .custom existential 路径且行为正确
+  private final class CustomBitmap: Bitmap {
+    private var bytes: [UInt8]
+    let count: Int
+
+    init(_ capacity: Int) {
+      self.count = capacity
+      self.bytes = Array(repeating: 0, count: (capacity + 7) / 8)
+    }
+
+    func set(value: Bool, for index: Int) {
+      guard count > index else { return }
+      let byte = index / 8
+      let bit = UInt8(index % 8)
+      if value {
+        bytes[byte] |= 1 << bit
+      } else {
+        bytes[byte] &= ~(1 << bit)
+      }
+    }
+
+    func get(for index: Int) -> Bool? {
+      guard count > index else { return nil }
+      return (bytes[index / 8] & (1 << UInt8(index % 8))) != 0
+    }
+  }
+
+  func testCustomBitmapPath() {
+    let bloom = BloomFilter(hashCount: 6,
+                            bitmap: CustomBitmap(100_000),
+                            hasher: DefaultHasher())
+    for i in 0..<500 {
+      bloom.add("custom-bitmap-\(i)")
+    }
+    for i in 0..<500 {
+      XCTAssertTrue(bloom.contains("custom-bitmap-\(i)"))
+    }
+    XCTAssertFalse(bloom.contains("not-present"))
+  }
+
+  func testCustomHasherAndBitmapPath() {
+    let bloom = BloomFilter(hashCount: 6,
+                            bitmap: CustomBitmap(100_000),
+                            hasher: CustomFNVHasher())
+    bloom.add("both")
+    XCTAssertTrue(bloom.contains("both"))
+    XCTAssertFalse(bloom.contains("neither"))
+  }
+
 }

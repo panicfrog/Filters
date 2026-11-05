@@ -109,4 +109,39 @@ final class BorrowingBenchmarks: XCTestCase {
     measure { drive(bloom) }
   }
 
+  // MARK: - 交替配对比较（消除机器漂移的权威数据）
+
+  /// 同进程内两实现交替各跑 9 轮取中位数：legacy 每轮慢的比值即净优化收益。
+  /// 输出格式：⏱ <hasher>: legacy=X.XXXs borrowed=X.XXXs → N.NNx
+  func testPairedLegacyVsBorrowed() {
+    func median(_ values: [Double]) -> Double {
+      values.sorted()[values.count / 2]
+    }
+    let rounds = 9
+    let configurations: [(String, Filter, Filter)] = [
+      ("Murmur3", makeLegacy(DefaultHasher()), makeNew(DefaultHasher())),
+      ("XXH32", makeLegacy(Xxhasher()), makeNew(Xxhasher())),
+    ]
+    for (label, legacy, modern) in configurations {
+      drive(legacy)   // 预热
+      drive(modern)
+      var legacyTimes: [Double] = []
+      var modernTimes: [Double] = []
+      for _ in 0..<rounds {
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        drive(legacy)
+        let t1 = DispatchTime.now().uptimeNanoseconds
+        drive(modern)
+        let t2 = DispatchTime.now().uptimeNanoseconds
+        legacyTimes.append(Double(t1 - t0) / 1e9)
+        modernTimes.append(Double(t2 - t1) / 1e9)
+      }
+      let legacyMedian = median(legacyTimes)
+      let modernMedian = median(modernTimes)
+      print("⏱ \(label): legacy=\(String(format: "%.3f", legacyMedian))s "
+            + "borrowed=\(String(format: "%.3f", modernMedian))s "
+            + "→ \(String(format: "%.2f", legacyMedian / modernMedian))x")
+    }
+  }
+
 }

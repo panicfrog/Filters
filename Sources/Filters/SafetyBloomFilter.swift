@@ -8,9 +8,26 @@ import Foundation
 
 final class SafetyBloomFilter: Filter {
 
-    private var bitmap: Bitmap
+    /// hasher 的内部表示：内建类型在 init 时归一化为免派发（direct call）的
+    /// 闭集 case，热循环中无 witness 表加载；自定义 hasher 落到 existential 兜底。
+    private enum HasherImpl {
+        case murmur3
+        case xxh32
+        case custom(any Hasher)
+    }
+
+    /// bitmap 的内部表示：同上。内建的具体类型（final class）调用可被内联，
+    /// 实测比 existential 派发快一个数量级。
+    private enum BitmapImpl {
+        case compressed(CompressedBitmap)
+        case mmap(MmapBitmap)
+        case custom(any Bitmap)
+    }
+
+    private let hasherImpl: HasherImpl
+    private let bitmapImpl: BitmapImpl
+    private let bitsCount: Int
     private let hashCount: Int
-    private let hasher: any Hasher
     private let queue = DispatchQueue(label: "github.io.panicfrog.BloomFilter.SafetyBloomFilter",
                                       attributes: .concurrent)
 
@@ -20,26 +37,53 @@ final class SafetyBloomFilter: Filter {
     ///   - hashCount: bits count per element
     ///   - hasher: hasher
     init(bitmap: Bitmap, hashCount: Int, hasher: any Hasher) {
-        self.bitmap = bitmap
         self.hashCount = hashCount
-        self.hasher = hasher
+        self.bitsCount = bitmap.count
+        if hasher is DefaultHasher {
+            self.hasherImpl = .murmur3
+        } else if hasher is Xxhasher {
+            self.hasherImpl = .xxh32
+        } else {
+            self.hasherImpl = .custom(hasher)
+        }
+        if let compressed = bitmap as? CompressedBitmap {
+            self.bitmapImpl = .compressed(compressed)
+        } else if let mmap = bitmap as? MmapBitmap {
+            self.bitmapImpl = .mmap(mmap)
+        } else {
+            self.bitmapImpl = .custom(bitmap)
+        }
     }
 
     /// add element to bloom filter
     ///
     /// 元素字节全程作用域借用（在 barrier 任务内完成哈希与置位），
-    /// 无中间 `Data` / `[Int]` 分配。
+    /// 无中间 `Data` / `[Int]` 分配；内建 hasher/bitmap 走免派发快速路径。
     /// - Parameter element: element
     func add(_ element: FilterElement) {
-        let bitmap = self.bitmap
+        let hasherImpl = self.hasherImpl
+        let bitmapImpl = self.bitmapImpl
+        let bitsCount = self.bitsCount
         let hashCount = self.hashCount
-        let hasher = self.hasher
         queue.async(flags: .barrier) {
             element.withUnsafeBytes { buffer in
-                let bitsCount = Int64(bitmap.count)
+                let bits = Int64(bitsCount)
                 for i in 0..<hashCount {
-                    let hash = hasher.hashValues(buffer, seed: UInt32(i))
-                    bitmap.set(value: true, for: Int(abs(Int64(hash)) % bitsCount))
+                    let location: Int
+                    switch hasherImpl {
+                    case .murmur3:
+                        location = Int(Int64(MurmurHash3.x86_32(buffer, seed: UInt32(i))) % bits)
+                    case .xxh32:
+                        location = Int(Int64(XXH.xxh32(buffer, seed: UInt32(i))) % bits)
+                    case .custom(let hasher):
+                        let hash = hasher.hashValues(buffer, seed: UInt32(i))
+                        location = Int(abs(Int64(hash)) % bits)
+                    }
+                    switch bitmapImpl {
+                    case .compressed(let bitmap): bitmap.set(value: true, for: location)
+                    case .mmap(let bitmap): bitmap.set(value: true, for: location)
+                    case .custom(let bitmap): bitmap.set(value: true, for: location)
+                    }
                 }
             }
         }
@@ -47,20 +91,36 @@ final class SafetyBloomFilter: Filter {
 
     /// determine whether the bloom filter contains this element
     ///
-    /// 元素字节全程作用域借用，无中间 `Data` / `[Int]` 分配，首个未命中位即返回。
+    /// 元素字节全程作用域借用，无中间 `Data` / `[Int]` 分配，首个未命中位即返回；
+    /// 内建 hasher/bitmap 走免派发快速路径。
     /// - Parameter element: element
     /// - Returns: result
     func contains(_ element: FilterElement) -> Bool {
-        let bitmap = self.bitmap
+        let hasherImpl = self.hasherImpl
+        let bitmapImpl = self.bitmapImpl
+        let bitsCount = self.bitsCount
         let hashCount = self.hashCount
-        let hasher = self.hasher
         return queue.sync {
             element.withUnsafeBytes { buffer -> Bool in
-                let bitsCount = Int64(bitmap.count)
+                let bits = Int64(bitsCount)
                 for i in 0..<hashCount {
-                    let hash = hasher.hashValues(buffer, seed: UInt32(i))
-                    if bitmap.get(for: Int(abs(Int64(hash)) % bitsCount)) == false {
-                        return false
+                    let location: Int
+                    switch hasherImpl {
+                    case .murmur3:
+                        location = Int(Int64(MurmurHash3.x86_32(buffer, seed: UInt32(i))) % bits)
+                    case .xxh32:
+                        location = Int(Int64(XXH.xxh32(buffer, seed: UInt32(i))) % bits)
+                    case .custom(let hasher):
+                        let hash = hasher.hashValues(buffer, seed: UInt32(i))
+                        location = Int(abs(Int64(hash)) % bits)
+                    }
+                    switch bitmapImpl {
+                    case .compressed(let bitmap):
+                        if bitmap.get(for: location) == false { return false }
+                    case .mmap(let bitmap):
+                        if bitmap.get(for: location) == false { return false }
+                    case .custom(let bitmap):
+                        if bitmap.get(for: location) == false { return false }
                     }
                 }
                 return true
