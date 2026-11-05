@@ -128,7 +128,9 @@ final class FiltersTests: XCTestCase {
   
   func testMmapBitmap() throws {
     let max = 30000
-    let url = URL(string: "/Users/yyp/Desktop/logs/bloom.cache")!
+    let url = FileManager.default.temporaryDirectory
+      .appendingPathComponent("bloom-\(UUID().uuidString).cache")
+    defer { try? FileManager.default.removeItem(at: url) }
     let bloom = BloomFilterBuilder.default
       .with(maxElements: max)
       .with { m in
@@ -159,5 +161,67 @@ final class FiltersTests: XCTestCase {
       }
       XCTAssertEqual(bloom.contains("\(max)"), false)
     }
-  
+
+  // MARK: - Bitmap set(value: false) tests
+
+  /// indices 覆盖了字内偏移 0、字边界（63/64/127/128）以及首尾位置
+  private static let bitmapTestIndices = [0, 1, 5, 10, 11, 63, 64, 65, 127, 128, 129, 199]
+
+  func testCompressedBitmapClearBit() {
+    let bitmap = CompressedBitmap(200)
+    // 初始为 0 的位，set(false) 后应保持 0（XOR 实现会错误地翻成 1）
+    for i in Self.bitmapTestIndices {
+      bitmap.set(value: false, for: i)
+      XCTAssertEqual(bitmap.get(for: i), false, "index \(i) should remain unset")
+    }
+    // 已置 1 的位，set(false) 后应清 0
+    for i in Self.bitmapTestIndices {
+      bitmap.set(value: true, for: i)
+    }
+    for i in Self.bitmapTestIndices {
+      bitmap.set(value: false, for: i)
+      XCTAssertEqual(bitmap.get(for: i), false, "index \(i) should be cleared")
+    }
+  }
+
+  func testCompressedBitmapClearDoesNotAffectNeighbors() {
+    let bitmap = CompressedBitmap(128)
+    bitmap.set(value: true, for: 10)
+    // 清除相邻的、本就为 0 的位 11，不应影响位 10
+    bitmap.set(value: false, for: 11)
+    XCTAssertEqual(bitmap.get(for: 11), false)
+    XCTAssertEqual(bitmap.get(for: 10), true)
+  }
+
+  func testMmapBitmapClearBit() throws {
+    let url = FileManager.default.temporaryDirectory
+      .appendingPathComponent("mmap-bitmap-\(UUID().uuidString).cache")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let bitmap = try MmapBitmap(200, path: url)
+    // 初始为 0 的位，set(false) 后应保持 0（XOR 实现会错误地翻成 1）
+    for i in Self.bitmapTestIndices {
+      bitmap.set(value: false, for: i)
+      XCTAssertEqual(bitmap.get(for: i), false, "index \(i) should remain unset")
+    }
+    // 已置 1 的位，set(false) 后应清 0
+    for i in Self.bitmapTestIndices {
+      bitmap.set(value: true, for: i)
+    }
+    for i in Self.bitmapTestIndices {
+      bitmap.set(value: false, for: i)
+      XCTAssertEqual(bitmap.get(for: i), false, "index \(i) should be cleared")
+    }
+  }
+
+  func testMmapBitmapClearDoesNotAffectNeighbors() throws {
+    let url = FileManager.default.temporaryDirectory
+      .appendingPathComponent("mmap-bitmap-\(UUID().uuidString).cache")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let bitmap = try MmapBitmap(128, path: url)
+    bitmap.set(value: true, for: 10)
+    bitmap.set(value: false, for: 11)
+    XCTAssertEqual(bitmap.get(for: 11), false)
+    XCTAssertEqual(bitmap.get(for: 10), true)
+  }
+
 }

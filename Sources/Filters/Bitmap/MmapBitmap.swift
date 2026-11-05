@@ -54,7 +54,7 @@ public final class MmapBitmap: Bitmap {
     if value {
       ptr.advanced(by: lct).pointee =  ptr.advanced(by: lct).pointee | 1 << idx
     } else {
-      ptr.advanced(by: lct).pointee =  ptr.advanced(by: lct).pointee ^ 1 << idx
+      ptr.advanced(by: lct).pointee =  ptr.advanced(by: lct).pointee & ~(1 << idx)
     }
   }
   

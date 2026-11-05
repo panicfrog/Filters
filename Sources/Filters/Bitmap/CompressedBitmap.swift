@@ -24,7 +24,7 @@ public final class CompressedBitmap: Bitmap {
     if value {
       bits[lct] = bits[lct] | 1 << idx
     } else {
-      bits[lct] = bits[lct] ^ 1 << idx
+      bits[lct] = bits[lct] & ~(1 << idx)
     }
   }
   
